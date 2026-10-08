@@ -2,14 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"srunClient/encryptlib"
 	"syscall"
 	"time"
 
 	"golang.org/x/term"
+	"gopkg.in/yaml.v3"
 )
 
 /*
@@ -18,9 +21,9 @@ get_challenge: 获取加密 token 的地址
 srun_portal: 身份认证地址
 */
 var targets = map[string]string{
-	"rad_user_info": "http://net.szu.edu.cn/cgi-bin/rad_user_info",
-	"get_challenge": "http://net.szu.edu.cn/cgi-bin/get_challenge",
-	"srun_portal":   "http://net.szu.edu.cn/cgi-bin/srun_portal",
+	"rad_user_info": "https://netauth.xjtlu.edu.cn/cgi-bin/rad_user_info",
+	"get_challenge": "https://netauth.xjtlu.edu.cn/cgi-bin/get_challenge",
+	"srun_portal":   "https://netauth.xjtlu.edu.cn/cgi-bin/srun_portal",
 }
 
 const (
@@ -36,10 +39,11 @@ const (
 	// 模拟 UA 头
 	userAgent string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 	// 加密常量
-	TYPE string = "1"
-	N    string = "200"
-	ENC  string = "srun_bx1"
-	ACID string = "12"
+	TYPE       string = "1"
+	N          string = "200"
+	ENC        string = "srun_bx1"
+	ACID       string = "0"
+	ConfigFile        = "config.yml"
 	//
 	ModeLogin  = "1"
 	ModeLogout = "2"
@@ -64,6 +68,95 @@ type srunPortalRes struct {
 
 type srunPortalErr struct {
 	ErrMsg string `json:"err_msg"`
+}
+
+type config struct {
+	Mode      string `yaml:"mode"`
+	Username  string `yaml:"username"`
+	Password  string `yaml:"password"`
+	OS        string `yaml:"os"`
+	IP        string `yaml:"ip"`
+	Interface string `yaml:"interface"`
+	AcID      string `yaml:"ac_id"`
+	EncVer    string `yaml:"EncVer"`
+	EncVerV2  string `yaml:"enc_ver"`
+}
+
+type arguments struct {
+	config
+	cliConfig  config
+	configPath string
+}
+
+func loadConfig(path string) (config, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return config{}, nil
+	}
+	if err != nil {
+		return config{}, err
+	}
+	var result config
+	if err := yaml.Unmarshal(data, &result); err != nil {
+		return config{}, err
+	}
+	return result, nil
+}
+
+func parseArguments() (arguments, error) {
+	var result arguments
+	flag.StringVar(&result.configPath, "config", ConfigFile, "YAML config file")
+	flag.StringVar(&result.Mode, "mode", "", "1 for login, 2 for logout")
+	flag.StringVar(&result.Username, "username", "", "username")
+	flag.StringVar(&result.Password, "password", "", "password")
+	flag.StringVar(&result.OS, "os", "", "device OS")
+	flag.StringVar(&result.IP, "ip", "", "login IP")
+	flag.StringVar(&result.Interface, "interface", "", "network interface (Python client only)")
+	flag.StringVar(&result.AcID, "ac_id", "", "access controller ID")
+	flag.StringVar(&result.EncVer, "EncVer", "", "encryption version")
+	flag.StringVar(&result.EncVerV2, "enc_ver", "", "encryption version")
+	flag.Parse()
+	cliConfig := result.config
+
+	fileConfig, err := loadConfig(result.configPath)
+	if err != nil {
+		return arguments{}, err
+	}
+	result.config = fileConfig
+	result.cliConfig = cliConfig
+	return result, nil
+}
+
+func applyArguments(args arguments) config {
+	result := args.config
+	if args.cliConfig.Mode != "" {
+		result.Mode = args.cliConfig.Mode
+	}
+	if args.cliConfig.Username != "" {
+		result.Username = args.cliConfig.Username
+	}
+	if args.cliConfig.Password != "" {
+		result.Password = args.cliConfig.Password
+	}
+	if args.cliConfig.OS != "" {
+		result.OS = args.cliConfig.OS
+	}
+	if args.cliConfig.IP != "" {
+		result.IP = args.cliConfig.IP
+	}
+	if args.cliConfig.Interface != "" {
+		result.Interface = args.cliConfig.Interface
+	}
+	if args.cliConfig.AcID != "" {
+		result.AcID = args.cliConfig.AcID
+	}
+	if args.cliConfig.EncVer != "" {
+		result.EncVer = args.cliConfig.EncVer
+	}
+	if args.cliConfig.EncVerV2 != "" {
+		result.EncVer = args.cliConfig.EncVerV2
+	}
+	return result
 }
 
 func checkErrMsg(body []byte) (string, error) {
@@ -159,15 +252,15 @@ func getChallenge(callback, username, ip, path string) (string, error) {
 	return respJson.Challenge, nil
 }
 
-func srunPortalLogin(callback, username, password, path, token, ip, os string) {
+func srunPortalLogin(callback, username, password, path, token, ip, os, acID, encVer string) {
 	fmt.Println("[*] 正在加密用户信息...")
 	hmd5_password := encryptlib.Hmd5(password, token)
 	info := encryptlib.GetInfo(encryptlib.Info{
 		Username: username,
 		Password: password,
 		Ip:       ip,
-		Acid:     ACID,
-		EncVer:   ENC,
+		Acid:     acID,
+		EncVer:   encVer,
 	}, token)
 	chksum := encryptlib.Sha1(
 		encryptlib.Chkstr(token, username, hmd5_password, ACID, ip, N, TYPE, info))
@@ -255,66 +348,78 @@ func srunPortalLogout(callback, username, ip, path string) {
 	fmt.Println("[*] 登出成功")
 }
 
-func login() {
-	var username, autoIp, autoOs, ip, os string
-	fmt.Print("[+] 请输入您的学号: ")
-	fmt.Scanln(&username)
-	fmt.Print("[+] 请输入您的密码: ")
-	password, _ := term.ReadPassword(int(syscall.Stdin))
-	fmt.Println()
-	fmt.Print("[?] 是否需要自动获取登录 ip [Y/n]: ")
-	fmt.Scanln(&autoIp)
-	switch autoIp {
-	case "y", "Y", "":
+func login(username, password, ip, os, acID, encVer string) {
+	if username == "" {
+		fmt.Print("[+] 请输入您的学号: ")
+		fmt.Scanln(&username)
+	}
+	if password == "" {
+		fmt.Print("[+] 请输入您的密码: ")
+		passwordBytes, _ := term.ReadPassword(int(syscall.Stdin))
+		password = string(passwordBytes)
+		fmt.Println()
+	}
+	if ip == "" {
 		var err error
 		ip, err = getIp(callback, targets["rad_user_info"])
 		if err != nil {
 			fmt.Println("获取 IP 失败, 请检查配置的 URL 或手动指定 ip")
 			return
 		}
-	default:
-		fmt.Print("[+] 请输入您的登录ip: ")
-		fmt.Scanln(&ip)
-	}
-	fmt.Print("[?] 是否需要指定设备os(默认为 Windows) [y/N]: ")
-	fmt.Scanln(&autoOs)
-	switch autoOs {
-	case "y", "Y":
-		fmt.Print("[+] 请输入设备os: ")
-		fmt.Scanln(&os)
-	default:
-		os = "Windows"
 	}
 	token, err := getChallenge(callback, username, ip, targets["get_challenge"])
 	if err != nil {
 		return
 	}
-	srunPortalLogin(callback, username, string(password), targets["srun_portal"], token, ip, os)
+	srunPortalLogin(callback, username, password, targets["srun_portal"], token, ip, os, acID, encVer)
 }
 
-func logout() {
-	var username string
-	fmt.Print("[+] 请输入您的学号: ")
-	fmt.Scanln(&username)
-	ip, err := getIp(callback, targets["rad_user_info"])
-	if err != nil {
-		fmt.Println("获取 IP 失败, 请检查配置的 URL")
-		return
+func logout(username, ip string) {
+	if username == "" {
+		fmt.Print("[+] 请输入您的学号: ")
+		fmt.Scanln(&username)
+	}
+	if ip == "" {
+		var err error
+		ip, err = getIp(callback, targets["rad_user_info"])
+		if err != nil {
+			fmt.Println("获取 IP 失败, 请检查配置的 URL")
+			return
+		}
 	}
 	srunPortalLogout(callback, username, ip, targets["srun_portal"])
 }
 
 func main() {
-	var mode string
-	fmt.Println(Banner)
-	fmt.Println("[1]登录 [2]登出 [other]退出")
-	fmt.Print("[+] 请选择工作模式: ")
-	fmt.Scanln(&mode)
-	switch mode {
+	fmt.Print(Banner)
+	args, err := parseArguments()
+	if err != nil {
+		fmt.Printf("[!] 读取配置失败: %v\n", err)
+		return
+	}
+	settings := applyArguments(args)
+	if settings.Interface != "" {
+		fmt.Fprintln(os.Stderr, "[!] --interface 仅支持 Linux 上的 Python 客户端")
+		os.Exit(1)
+	}
+	if settings.OS == "" {
+		settings.OS = "Windows"
+	}
+	if settings.AcID == "" {
+		settings.AcID = ACID
+	}
+	if settings.EncVer == "" {
+		settings.EncVer = ENC
+	}
+	if settings.Mode == "" {
+		fmt.Print("[+] 请选择工作模式 [1]登录 [2]登出: ")
+		fmt.Scanln(&settings.Mode)
+	}
+	switch settings.Mode {
 	case ModeLogin:
-		login()
+		login(settings.Username, settings.Password, settings.IP, settings.OS, settings.AcID, settings.EncVer)
 	case ModeLogout:
-		logout()
+		logout(settings.Username, settings.IP)
 	default:
 		fmt.Println("[*] BYE")
 	}
