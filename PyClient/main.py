@@ -8,6 +8,7 @@ import platform
 import socket
 import yaml
 from requests.adapters import HTTPAdapter
+from requests_toolbelt.adapters.socket_options import SocketOptionsAdapter
 from typing import Union
 from enum import Enum
 from urllib.parse import urlencode
@@ -44,29 +45,13 @@ ACID = "0"
 CONFIG_FILE = "config.yml"
 session = requests.Session()
 
-
-class InterfaceAdapter(HTTPAdapter):
-    def __init__(self, interface: str):
-        self.socket_options = [
-            (socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode())
-        ]
-        super().__init__()
-
-    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
-        pool_kwargs["socket_options"] = self.socket_options
-        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
-
-    def proxy_manager_for(self, proxy, **proxy_kwargs):
-        proxy_kwargs["socket_options"] = self.socket_options
-        return super().proxy_manager_for(proxy, **proxy_kwargs)
-
-
 def bind_to_interface(interface: str) -> None:
     if platform.system() != "Linux":
         raise RuntimeError("--interface 仅支持 Linux 上的 Python 客户端")
     if not hasattr(socket, "SO_BINDTODEVICE"):
         socket.SO_BINDTODEVICE = 25
-    adapter = InterfaceAdapter(interface)
+    options = [(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode)]
+    adapter = SocketOptionsAdapter(socket_options=options)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
 
