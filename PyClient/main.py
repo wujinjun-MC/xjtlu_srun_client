@@ -2,6 +2,12 @@ import time
 import json
 import requests
 import sys
+import argparse
+import getpass
+import platform
+import socket
+import yaml
+from requests.adapters import HTTPAdapter
 from typing import Union
 from enum import Enum
 from urllib.parse import urlencode
@@ -20,9 +26,9 @@ if version < (3, 0):
 # get_challenge: 获取加密 token 的地址
 # srun_portal: 身份认证地址
 url = {
-    'rad_user_info': 'http://net.szu.edu.cn/cgi-bin/rad_user_info',
-    'get_challenge': 'http://net.szu.edu.cn/cgi-bin/get_challenge',
-    'srun_portal'  : 'http://net.szu.edu.cn/cgi-bin/srun_portal'
+    'rad_user_info': 'https://netauth.xjtlu.edu.cn/cgi-bin/rad_user_info',
+    'get_challenge': 'https://netauth.xjtlu.edu.cn/cgi-bin/get_challenge',
+    'srun_portal'  : 'https://netauth.xjtlu.edu.cn/cgi-bin/srun_portal'
 }
 
 # jsonp 的标志, 一般不用变动
@@ -34,7 +40,35 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 TYPE = "1"
 N = "200"
 ENC = 'srun_bx1'
-ACID = "12"
+ACID = "0"
+CONFIG_FILE = "config.yml"
+session = requests.Session()
+
+
+class InterfaceAdapter(HTTPAdapter):
+    def __init__(self, interface: str):
+        self.socket_options = [
+            (socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode())
+        ]
+        super().__init__()
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        pool_kwargs["socket_options"] = self.socket_options
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        proxy_kwargs["socket_options"] = self.socket_options
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+
+def bind_to_interface(interface: str) -> None:
+    if platform.system() != "Linux":
+        raise RuntimeError("--interface 仅支持 Linux 上的 Python 客户端")
+    if not hasattr(socket, "SO_BINDTODEVICE"):
+        socket.SO_BINDTODEVICE = 25
+    adapter = InterfaceAdapter(interface)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
 
 BANNER = """
    ________  __  __  ____                ________          __ 
@@ -53,7 +87,7 @@ def get_ip(callback: str, path: str) -> Union[str, None]:
     params = urlencode({"callback": callback})
     try:
         print("[*] 正在尝试自动获取登录 ip...")
-        resp = requests.get(
+        resp = session.get(
             url=f"{path}?{params}",
             headers={"User-Agent": UA}
         )
@@ -65,6 +99,7 @@ def get_ip(callback: str, path: str) -> Union[str, None]:
         print("2. 配置的 URL 是否正确")
     except json.JSONDecodeError:
         print("[!] 成功获取返回值, 但是 json 解析失败")
+
         print("[*] 正在检查是否存在 callback 信息...")
         if resp.text[:len(callback)] == callback:
             print("[!] 正常获取了 callback 信息, 请人工检查返回内容是否符合 json 格式:")
@@ -97,14 +132,21 @@ def get_challenge(
     params = urlencode({
         "callback": callback,
         "username": username,
-        "ip": ip
+        "ip": ip,
+        "_": int(time.time() * 1000)
     })
     try:
+        url=f"{path}?{params}"
         print("[*] 正在获取加密 token...")
-        resp = requests.get(
-            url=f"{path}?{params}",
+        resp = session.get(
+            url=url,
             headers={"User-Agent": UA}
         )
+
+        # Verbose
+        print(f"[Verbose] get_challenge {url} returns:")
+        print(resp.text)
+
         get_challenge = resp.text[len(callback)+1:-1]
         challenge = json.loads(get_challenge)['challenge']
     except requests.RequestException:
@@ -113,6 +155,11 @@ def get_challenge(
         print("2. 配置的 URL 是否正确")
     except json.JSONDecodeError:
         print("[!] 成功获取返回值, 但是 json 解析失败")
+
+        #Verbose
+        print("[Verbose] 返回:")
+        print(resp.text)
+
         print("[*] 正在检查是否存在 callback 信息...")
         if resp.text[:len(callback)] == callback:
             print("[!] 正常获取了 callback 信息, 请人工检查返回内容是否符合 json 格式:")
@@ -144,6 +191,8 @@ def srun_portal_login(
         token: str,
         ip: str,
         os: str,
+        ac_id: str,
+        enc_ver: str,
     ) -> None:
     try:
         print("[*] 正在加密用户信息...")
@@ -152,11 +201,11 @@ def srun_portal_login(
             "username": username,
             "password": password,
             "ip": ip,
-            "acid": ACID,
-            "enc_ver": ENC
+            "acid": ac_id,
+            "enc_ver": enc_ver
         }, token)
         chksum = sha1(chkstr(
-            token, username, hmd5_password, ACID, ip, N, TYPE, info
+            token, username, hmd5_password, ac_id, ip, N, TYPE, info
         ))
         print("[*] 已完成用户信息加密, 准备进入身份认证")
     except Exception as e:
@@ -173,7 +222,7 @@ def srun_portal_login(
         "double_stack": 0,
         "chksum": chksum,
         "info": info,
-        "ac_id": ACID,
+        "ac_id": ac_id,
         "ip": ip,
         "n": N,
         "type": TYPE,
@@ -181,7 +230,7 @@ def srun_portal_login(
         '_': int(time.time() * 1000)
     })
     try:
-        resp = requests.get(
+        resp = session.get(
             url=f"{path}?{params}",
             headers={"User-Agent": UA}
         )
@@ -215,7 +264,7 @@ def srun_portal_logout(
         "username": username,
         "ip": ip
     })
-    resp = requests.get(
+    resp = session.get(
         f"{path}?{params}"
     )
     result = json.loads(resp.text[len(callback)+1:-1])
@@ -225,28 +274,24 @@ def srun_portal_logout(
         print("[*] 登出失败")
 
 
-def logout():
-    username = input("[+] 请输入您的学号: ")
-    ip = get_ip(callback, url['rad_user_info'])
+def logout(username: str, ip: Union[str, None]):
+    if not username:
+        username = input("[+] 请输入您的学号: ")
+    if not ip:
+        ip = get_ip(callback, url['rad_user_info'])
     assert ip != None, "获取 IP 失败, 请检查配置的 URL"
     srun_portal_logout(callback, username, ip, url['srun_portal'])
 
 
-def login():
-    import getpass
-    username = input("[+] 请输入您的学号: ")
-    password = getpass.getpass("[+] 请输入您的密码: ")
-    auto_ip = input("[?] 是否需要自动获取登录 ip [Y/n]: ") or 'Y'
-    if auto_ip.lower() == 'y':
+def login(username: str, password: str, ip: Union[str, None], os: str,
+          ac_id: str, enc_ver: str):
+    if not username:
+        username = input("[+] 请输入您的学号: ")
+    if not password:
+        password = getpass.getpass("[+] 请输入您的密码: ")
+    if not ip:
         ip = get_ip(callback, url['rad_user_info'])
         assert ip != None, "获取 IP 失败, 请检查配置的 URL 或手动指定 ip"
-    else:
-        ip = input("[+] 请输入您的登录ip: ")
-    auto_os = input("[?] 是否需要指定设备os(默认为 Windows) [y/N]: ") or 'N'
-    if auto_os.lower() == 'y':
-        os = input("[+] 请输入设备os: ")
-    else:
-        os = "Windows"
 
     token = get_challenge(
         callback, username,
@@ -256,17 +301,52 @@ def login():
         srun_portal_login(
             callback, username,
             password, url["srun_portal"],
-            token, ip, os
+            token, ip, os, ac_id, enc_ver
         )
+
+
+def load_config(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file) or {}
+    except FileNotFoundError:
+        return {}
+    if not isinstance(config, dict):
+        raise ValueError("配置文件必须是 YAML 对象")
+    return config
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=CONFIG_FILE)
+    for name in ("mode", "username", "password", "os", "ip", "ac_id", "enc_ver", "interface"):
+        parser.add_argument(f"--{name}")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
     print(BANNER)
-    print("[1]登录 [2]登出 [other]退出")
-    mode = input("[+] 请选择工作模式: ")
+    args = parse_args()
+    config = load_config(args.config)
+    values = {
+        name: getattr(args, name) if getattr(args, name) is not None
+        else config.get(name)
+        for name in ("mode", "username", "password", "os", "ip", "ac_id", "enc_ver", "interface")
+    }
+    if values["interface"]:
+        try:
+            bind_to_interface(values["interface"])
+        except RuntimeError as e:
+            print(f"[!] {e}", file=sys.stderr)
+            sys.exit(1)
+    mode = values["mode"] or input("[+] 请选择工作模式 [1]登录 [2]登出: ")
+    values["os"] = values["os"] or "Windows"
+    values["ac_id"] = values["ac_id"] or ACID
+    values["enc_ver"] = values["enc_ver"] or ENC
     if mode == Mode.Login.value:
-        login()
+        login(values["username"], values["password"], values["ip"], values["os"],
+              values["ac_id"], values["enc_ver"])
     elif mode == Mode.Logout.value:
-        logout()
+        logout(values["username"], values["ip"])
     else:
         print("[*] BYE")
