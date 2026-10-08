@@ -2,3 +2,5 @@
 *.pyc
 test*
 **/bin
+config.yml
+srunClient
