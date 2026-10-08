@@ -61,16 +61,15 @@ password: "your password"
 #ac_id: "0"
 # Encrypt version: SRun internal value
 #enc_ver: "srun_bx1"
-# 【新增】 指定接口 (仅支持Linux, Python客户端)
+# 【新增】 指定接口 (仅支持Linux, Python客户端, 可能需要 sudo)
 #interface: wlan0
 ```
 
 mode,username,password 必须填写，不填写时启动客户端会自动询问。
 
 Use `--mode`, `--username`, `--password`, `--os`, `--ip`, `--interface`, `--ac_id`, and `--enc_ver` with the Python client.
-`interface` binds all client
 
-HTTP requests to the named Linux network interface through `SO_BINDTODEVICE`.
+`interface` binds all client HTTP requests to the named Linux network interface through `SO_BINDTODEVICE`. Root privillage may be required.
 
 Specifying `interface` on a non-Linux system or with the Go client exits with an error.
 
